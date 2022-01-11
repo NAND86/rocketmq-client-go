@@ -369,7 +369,7 @@ func (p *defaultProducer) selectMessageQueue(msg *primitive.Message) *primitive.
 		return nil
 	}
 
-	if result.MqList != nil && len(result.MqList) <= 0 {
+	if len(result.MqList) <= 0 {
 		rlog.Error("can not find proper message queue", nil)
 		return nil
 	}

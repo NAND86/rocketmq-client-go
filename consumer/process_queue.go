@@ -259,8 +259,10 @@ func (pq *processQueue) getMessages() []*primitive.MessageExt {
 }
 
 func (pq *processQueue) takeMessages(number int) []*primitive.MessageExt {
-	for pq.msgCache.Empty() {
+	countTmp := 0
+	for pq.msgCache.Empty() && countTmp < 100 {
 		time.Sleep(10 * time.Millisecond)
+		countTmp++
 	}
 	result := make([]*primitive.MessageExt, number)
 	i := 0

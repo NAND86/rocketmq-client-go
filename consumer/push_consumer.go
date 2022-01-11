@@ -441,6 +441,12 @@ func (pc *pushConsumer) pullMessage(request *PullRequest) {
 				return
 			default:
 				pc.submitToConsume(request.pq, request.mq)
+				if request.pq.IsDroppd() {
+					rlog.Info("push consumer quit pullMessage for dropped queue.", map[string]interface{}{
+						rlog.LogKeyConsumerGroup: pc.consumerGroup,
+					})
+					return
+				}
 			}
 		}
 	})
@@ -486,16 +492,18 @@ func (pc *pushConsumer) pullMessage(request *PullRequest) {
 		}
 
 		cachedMessageSizeInMiB := int(pq.cachedMsgSize / Mb)
-		if pq.cachedMsgCount > pc.option.PullThresholdForQueue {
+		// if pq.cachedMsgCount > pc.option.PullThresholdForQueue {
+		if int64(pq.msgCache.Size()) > pc.option.PullThresholdForQueue {
 			if pc.queueFlowControlTimes%1000 == 0 {
 				rlog.Warning("the cached message count exceeds the threshold, so do flow control", map[string]interface{}{
 					"PullThresholdForQueue": pc.option.PullThresholdForQueue,
 					"minOffset":             pq.Min(),
 					"maxOffset":             pq.Max(),
-					"count":                 pq.msgCache,
-					"size(MiB)":             cachedMessageSizeInMiB,
-					"flowControlTimes":      pc.queueFlowControlTimes,
-					rlog.LogKeyPullRequest:  request.String(),
+					// "count":                 pq.msgCache,
+					"count":                pq.cachedMsgCount,
+					"size(MiB)":            cachedMessageSizeInMiB,
+					"flowControlTimes":     pc.queueFlowControlTimes,
+					rlog.LogKeyPullRequest: request.String(),
 				})
 			}
 			pc.queueFlowControlTimes++
@@ -509,7 +517,7 @@ func (pc *pushConsumer) pullMessage(request *PullRequest) {
 					"PullThresholdSizeForQueue": pc.option.PullThresholdSizeForQueue,
 					"minOffset":                 pq.Min(),
 					"maxOffset":                 pq.Max(),
-					"count":                     pq.msgCache,
+					"count":                     pq.cachedMsgCount,
 					"size(MiB)":                 cachedMessageSizeInMiB,
 					"flowControlTimes":          pc.queueFlowControlTimes,
 					rlog.LogKeyPullRequest:      request.String(),
@@ -528,10 +536,11 @@ func (pc *pushConsumer) pullMessage(request *PullRequest) {
 						"minOffset":                  pq.Min(),
 						"maxOffset":                  pq.Max(),
 						"maxSpan":                    pq.getMaxSpan(),
-						"flowControlTimes":           pc.queueFlowControlTimes,
+						"flowControlTimes":           pc.queueMaxSpanFlowControlTimes,
 						rlog.LogKeyPullRequest:       request.String(),
 					})
 				}
+				pc.queueMaxSpanFlowControlTimes++
 				sleepTime = _PullDelayTimeWhenFlowControl
 				goto NEXT
 			}
@@ -891,12 +900,13 @@ func (pc *pushConsumer) consumeMessageCurrently(pq *processQueue, mq *primitive.
 				Properties:    make(map[string]string),
 				ConsumerGroup: pc.consumerGroup,
 				MQ:            mq,
-				Msgs:          msgs,
+				Msgs:          subMsgs,
 			}
 			ctx := context.Background()
 			ctx = primitive.WithConsumerCtx(ctx, msgCtx)
 			ctx = primitive.WithMethod(ctx, primitive.ConsumerPush)
 			concurrentCtx := primitive.NewConsumeConcurrentlyContext()
+			concurrentCtx.DelayLevelWhenNextConsume = 2 // 延时等级设为2，即，5秒
 			concurrentCtx.MQ = *mq
 			ctx = primitive.WithConcurrentlyCtx(ctx, concurrentCtx)
 
@@ -922,14 +932,14 @@ func (pc *pushConsumer) consumeMessageCurrently(pq *processQueue, mq *primitive.
 				} else {
 					increaseConsumeFailedTPS(pc.consumerGroup, mq.Topic, len(subMsgs))
 					if pc.model == BroadCasting {
-						for i := 0; i < len(msgs); i++ {
+						for i := 0; i < len(subMsgs); i++ {
 							rlog.Warning("BROADCASTING, the message consume failed, drop it", map[string]interface{}{
 								"message": subMsgs[i],
 							})
 						}
 					} else {
-						for i := 0; i < len(msgs); i++ {
-							msg := msgs[i]
+						for i := 0; i < len(subMsgs); i++ {
+							msg := subMsgs[i]
 							if !pc.sendMessageBack(mq.BrokerName, msg, concurrentCtx.DelayLevelWhenNextConsume) {
 								msg.ReconsumeTimes += 1
 								msgBackFailed = append(msgBackFailed, msg)
@@ -951,7 +961,7 @@ func (pc *pushConsumer) consumeMessageCurrently(pq *processQueue, mq *primitive.
 			} else {
 				rlog.Warning("processQueue is dropped without process consume result.", map[string]interface{}{
 					rlog.LogKeyMessageQueue: mq,
-					"message":               msgs,
+					"message":               subMsgs,
 				})
 			}
 		})
@@ -1025,6 +1035,7 @@ func (pc *pushConsumer) consumeMessageOrderly(pq *processQueue, mq *primitive.Me
 			ctx = primitive.WithMethod(ctx, primitive.ConsumerPush)
 
 			orderlyCtx := primitive.NewConsumeOrderlyContext()
+			orderlyCtx.SuspendCurrentQueueTimeMillis = 10 // 每次挂起10毫秒
 			orderlyCtx.MQ = *mq
 			ctx = primitive.WithOrderlyCtx(ctx, orderlyCtx)
 
@@ -1107,7 +1118,7 @@ func (pc *pushConsumer) checkReconsumeTimes(msgs []*primitive.MessageExt) bool {
 	if len(msgs) != 0 {
 		maxReconsumeTimes := pc.getOrderlyMaxReconsumeTimes()
 		for _, msg := range msgs {
-			if msg.ReconsumeTimes > maxReconsumeTimes {
+			if msg.ReconsumeTimes >= maxReconsumeTimes {
 				rlog.Warning(fmt.Sprintf("msg will be send to retry topic due to ReconsumeTimes > %d, \n", maxReconsumeTimes), nil)
 				msg.WithProperty("RECONSUME_TIME", strconv.Itoa(int(msg.ReconsumeTimes)))
 				if !pc.sendMessageBack("", msg, -1) {

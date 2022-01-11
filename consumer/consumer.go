@@ -27,7 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/json-iterator/go"
+	jsoniter "github.com/json-iterator/go"
 	"github.com/pkg/errors"
 	"github.com/tidwall/gjson"
 
@@ -662,6 +662,9 @@ func (dc *defaultConsumer) updateProcessQueueTable(topic string, mqs []*primitiv
 		if mq.Topic == topic {
 			if !mqSet[mq] {
 				pq.WithDropped(true)
+				rlog.Warning("the message queue WithDropped.", map[string]interface{}{
+					rlog.LogKeyMessageQueue: mq.String(),
+				})
 				if dc.removeUnnecessaryMessageQueue(&mq, pq) {
 					dc.processQueueTable.Delete(key)
 					changed = true

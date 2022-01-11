@@ -53,7 +53,7 @@ func (r *ResponseFuture) executeInvokeCallback() {
 	})
 }
 
-func (r *ResponseFuture) waitResponse() (*RemotingCommand, error) {
+func (r *ResponseFuture) waitResponse(c *remotingClient) (*RemotingCommand, error) {
 	var (
 		cmd *RemotingCommand
 		err error
@@ -65,5 +65,10 @@ func (r *ResponseFuture) waitResponse() (*RemotingCommand, error) {
 		err = utils.ErrRequestTimeout
 		r.Err = err
 	}
+
+	if c != nil {
+		c.responseTable.Delete(r.Opaque)
+	}
+
 	return cmd, err
 }
